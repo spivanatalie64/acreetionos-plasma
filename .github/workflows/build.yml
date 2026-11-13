@@ -19,8 +19,14 @@ jobs:
     steps:
       - name: Install deps
         run: |
-          pacman -Sy --noconfirm archlinux-keyring
-          pacman -S --noconfirm --needed archiso squashfs-tools dosfstools erofs-utils mtools xorriso libarchive grub edk2-shell git github-cli openssh
+          pacman-key --init
+          pacman-key --populate archlinux
+          # Full upgrade in the same transaction as the deps. A bare -Sy
+          # followed by -S is a partial upgrade: it stranded the build the
+          # moment Arch moved to OpenSSL 4, whose soname bump broke every
+          # installed package linked against libcrypto.so=3 (curl, pacman,
+          # cryptsetup...). -Syu moves the whole system together.
+          pacman -Syu --noconfirm --needed archlinux-keyring archiso squashfs-tools dosfstools erofs-utils mtools xorriso libarchive grub edk2-shell git github-cli openssh
       - uses: actions/checkout@v4
       - name: Build ISO
         run: |
