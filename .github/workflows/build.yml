@@ -26,7 +26,7 @@ jobs:
           # moment Arch moved to OpenSSL 4, whose soname bump broke every
           # installed package linked against libcrypto.so=3 (curl, pacman,
           # cryptsetup...). -Syu moves the whole system together.
-          pacman -Syu --noconfirm --needed archlinux-keyring archiso squashfs-tools dosfstools erofs-utils mtools xorriso libarchive grub edk2-shell git github-cli openssh
+          pacman -Syu --noconfirm --needed archlinux-keyring archiso squashfs-tools dosfstools erofs-utils mtools xorriso libarchive grub edk2-shell git github-cli openssh rclone
       - uses: actions/checkout@v4
       - name: Build ISO
         run: |
@@ -44,42 +44,47 @@ jobs:
           name: AcreetionOS-Plasma
           path: ./ISO/*.iso
           retention-days: 7
-      - name: Publish to ISO mirror
-        if: github.event_name != 'pull_request'
-        shell: bash
+      - name: Publish to Cloudflare R2
         env:
-          SSH_KEY: ${{ secrets.ISO_DEPLOY_KEY }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: "86a77a981dd5e5a634330a4819aaa2e0"
+          R2_BUCKET: "acreetionos-isos"
           EDITION: PLASMA
         run: |
           set -euo pipefail
           ISO="$(ls ./ISO/*.iso | head -1 || true)"
           if [ -z "$ISO" ]; then echo "no ISO to publish"; exit 0; fi
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          # This endpoint does not present one stable host key: the scan
-          # can succeed and scp STILL fails verification, because the
-          # connection lands on a different backend presenting a
-          # different key (and some days the scan itself times out --
-          # both flavors produce the same "Host key verification
-          # failed"). So: scan repeatedly, accumulate EVERY distinct
-          # key the endpoint presents, dedupe, and let scp match
-          # whichever backend it lands on.
-          : > ~/.ssh/known_hosts.raw
-          for attempt in 1 2 3 4 5 6 7 8; do
-            ssh-keyscan -T 20 -p 2400 us.iso.acreetionos.org >> ~/.ssh/known_hosts.raw 2>/dev/null || true
-            sleep 3
-          done
-          sort -u ~/.ssh/known_hosts.raw > ~/.ssh/known_hosts
-          KEYS=$(grep -c '^\[us\.iso\.acreetionos\.org\]:2400 ' ~/.ssh/known_hosts || true)
-          echo "collected $KEYS distinct host key line(s) for us.iso.acreetionos.org:2400"
-          [ "$KEYS" -ge 1 ] || { echo "ERROR: could not scan any host key for us.iso.acreetionos.org:2400"; exit 1; }
+          # Publishing moved off the SSH mirror (owner's call, 2026-11-13):
+          # that route failed three different ways in three runs -- scan
+          # silence, host-key mismatch, and connection closed mid-flight
+          # even with 4 collected keys. R2 over HTTPS has none of those
+          # failure modes. Needs two repo secrets, created from an R2
+          # API token in the Cloudflare dashboard: R2_ACCESS_KEY_ID and
+          # R2_SECRET_ACCESS_KEY. Until they exist this step fails LOUD
+          # on purpose -- a green run that published nothing is how the
+          # old release step lied for months.
+          if [ -z "$R2_ACCESS_KEY_ID" ] || [ -z "$R2_SECRET_ACCESS_KEY" ]; then
+            echo "ERROR: R2 secrets are not set on this repo yet."
+            echo "Cloudflare dashboard -> R2 -> Manage API tokens -> create"
+            echo "an Object Read & Write token for bucket $R2_BUCKET, then"
+            echo "add its Access Key ID / Secret Access Key as repo secrets"
+            echo "named R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY."
+            exit 1
+          fi
           BASE="$(basename "$ISO" .iso)"
           DATED="${BASE}-$(date +%Y%m%d).iso"
           LATEST="AcreetionOS-${EDITION}-latest.iso"
-          scp -P 2400 -i ~/.ssh/id_ed25519 "$ISO" "natalie@us.iso.acreetionos.org:/drive1/community/${DATED}"
-          ssh -p 2400 -i ~/.ssh/id_ed25519 natalie@us.iso.acreetionos.org "cd /drive1/community && ln -sfn '${DATED}' '${LATEST}' && : > SUMS.body && for f in *.iso; do sha256sum \"\$f\" >> SUMS.body; done && : > SUMS.alias && for l in *-latest.iso; do t=\$(readlink \"\$l\"); (grep \" \$t\\\$\" SUMS.body || true) | sed \"s/ \$t\\\$/ \$l/\" >> SUMS.alias; done && cat SUMS.body SUMS.alias > SHA256SUMS && rm -f SUMS.body SUMS.alias"
-          echo "Published ${DATED} (+ ${LATEST} alias) to iso.acreetionos.org/community/"
+          export RCLONE_CONFIG_R2_TYPE=s3
+          export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+          export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+          export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+          export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          rclone copyto "$ISO" "r2:${R2_BUCKET}/${DATED}" --progress --s3-chunk-size 64M
+          rclone copyto "r2:${R2_BUCKET}/${DATED}" "r2:${R2_BUCKET}/${LATEST}"
+          ( cd ./ISO && sha256sum "$(basename "$ISO")" ) > SHA256SUMS.txt
+          rclone copyto SHA256SUMS.txt "r2:${R2_BUCKET}/SHA256SUMS.txt"
+          echo "Published ${DATED} (+ ${LATEST} alias) to R2 bucket ${R2_BUCKET}"
 
       - name: Publish Release
         if: github.event_name != 'pull_request'
