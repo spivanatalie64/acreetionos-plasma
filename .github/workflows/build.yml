@@ -51,7 +51,21 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p 2400 us.iso.acreetionos.org >> ~/.ssh/known_hosts 2>/dev/null
+          # ssh-keyscan intermittently returns nothing against this host;
+          # the old line hid that behind 2>/dev/null and scp then died with
+          # a misleading "Host key verification failed". Retry the scan,
+          # keep its output visible, and stop loudly if no key arrives.
+          : > ~/.ssh/known_hosts
+          for attempt in 1 2 3 4 5; do
+            ssh-keyscan -T 20 -p 2400 us.iso.acreetionos.org >> ~/.ssh/known_hosts || true
+            if grep -q '^\[us\.iso\.acreetionos\.org\]:2400 ' ~/.ssh/known_hosts; then
+              echo "host key scanned on attempt $attempt"
+              break
+            fi
+            echo "keyscan attempt $attempt returned no key; retrying in 10s"
+            sleep 10
+          done
+          grep -q '^\[us\.iso\.acreetionos\.org\]:2400 ' ~/.ssh/known_hosts || { echo "ERROR: could not scan host key for us.iso.acreetionos.org:2400 after 5 attempts"; exit 1; }
           BASE="$(basename "$ISO" .iso)"
           DATED="${BASE}-$(date +%Y%m%d).iso"
           LATEST="AcreetionOS-${EDITION}-latest.iso"
