@@ -57,21 +57,23 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          # ssh-keyscan intermittently returns nothing against this host;
-          # the old line hid that behind 2>/dev/null and scp then died with
-          # a misleading "Host key verification failed". Retry the scan,
-          # keep its output visible, and stop loudly if no key arrives.
-          : > ~/.ssh/known_hosts
-          for attempt in 1 2 3 4 5; do
-            ssh-keyscan -T 20 -p 2400 us.iso.acreetionos.org >> ~/.ssh/known_hosts || true
-            if grep -q '^\[us\.iso\.acreetionos\.org\]:2400 ' ~/.ssh/known_hosts; then
-              echo "host key scanned on attempt $attempt"
-              break
-            fi
-            echo "keyscan attempt $attempt returned no key; retrying in 10s"
-            sleep 10
+          # This endpoint does not present one stable host key: the scan
+          # can succeed and scp STILL fails verification, because the
+          # connection lands on a different backend presenting a
+          # different key (and some days the scan itself times out --
+          # both flavors produce the same "Host key verification
+          # failed"). So: scan repeatedly, accumulate EVERY distinct
+          # key the endpoint presents, dedupe, and let scp match
+          # whichever backend it lands on.
+          : > ~/.ssh/known_hosts.raw
+          for attempt in 1 2 3 4 5 6 7 8; do
+            ssh-keyscan -T 20 -p 2400 us.iso.acreetionos.org >> ~/.ssh/known_hosts.raw 2>/dev/null || true
+            sleep 3
           done
-          grep -q '^\[us\.iso\.acreetionos\.org\]:2400 ' ~/.ssh/known_hosts || { echo "ERROR: could not scan host key for us.iso.acreetionos.org:2400 after 5 attempts"; exit 1; }
+          sort -u ~/.ssh/known_hosts.raw > ~/.ssh/known_hosts
+          KEYS=$(grep -c '^\[us\.iso\.acreetionos\.org\]:2400 ' ~/.ssh/known_hosts || true)
+          echo "collected $KEYS distinct host key line(s) for us.iso.acreetionos.org:2400"
+          [ "$KEYS" -ge 1 ] || { echo "ERROR: could not scan any host key for us.iso.acreetionos.org:2400"; exit 1; }
           BASE="$(basename "$ISO" .iso)"
           DATED="${BASE}-$(date +%Y%m%d).iso"
           LATEST="AcreetionOS-${EDITION}-latest.iso"
