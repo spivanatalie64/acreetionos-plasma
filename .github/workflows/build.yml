@@ -44,47 +44,52 @@ jobs:
           name: AcreetionOS-Plasma
           path: ./ISO/*.iso
           retention-days: 7
-      - name: Publish to Cloudflare R2
+      - name: Publish to US server (S3)
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: "86a77a981dd5e5a634330a4819aaa2e0"
-          R2_BUCKET: "acreetionos-isos"
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT: "https://s3.acreetionos.org"
+          S3_BUCKET: "acreetionos-isos"
           EDITION: PLASMA
         run: |
           set -euo pipefail
           ISO="$(ls ./ISO/*.iso | head -1 || true)"
           if [ -z "$ISO" ]; then echo "no ISO to publish"; exit 0; fi
-          # Publishing moved off the SSH mirror (owner's call, 2026-11-13):
-          # that route failed three different ways in three runs -- scan
-          # silence, host-key mismatch, and connection closed mid-flight
-          # even with 4 collected keys. R2 over HTTPS has none of those
-          # failure modes. Needs two repo secrets, created from an R2
-          # API token in the Cloudflare dashboard: R2_ACCESS_KEY_ID and
-          # R2_SECRET_ACCESS_KEY. Until they exist this step fails LOUD
-          # on purpose -- a green run that published nothing is how the
-          # old release step lied for months.
-          if [ -z "$R2_ACCESS_KEY_ID" ] || [ -z "$R2_SECRET_ACCESS_KEY" ]; then
-            echo "ERROR: R2 secrets are not set on this repo yet."
-            echo "Cloudflare dashboard -> R2 -> Manage API tokens -> create"
-            echo "an Object Read & Write token for bucket $R2_BUCKET, then"
-            echo "add its Access Key ID / Secret Access Key as repo secrets"
-            echo "named R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY."
+          # Publishing history: the SSH mirror route failed three runs in
+          # three different ways, so publishing moved to Cloudflare R2
+          # (owner's call, 2026-11-13) -- but the R2 bucket was never
+          # created and the secrets were never set, so that step failed
+          # loud on every run. Owner's call, 2026-11-16: no R2 at all.
+          # Publish instead to the self-hosted S3-compatible store
+          # (Garage) on the US server: same S3-over-HTTPS shape as R2,
+          # none of the SSH failure modes, on our own hardware.
+          # Endpoint https://s3.acreetionos.org, bucket acreetionos-isos,
+          # key "plasma-ci" (read/write/owner on that bucket only),
+          # stored as repo secrets S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY.
+          # Rotate with `garage key` on the server, then update the secrets.
+          if [ -z "$S3_ACCESS_KEY_ID" ] || [ -z "$S3_SECRET_ACCESS_KEY" ]; then
+            echo "ERROR: S3 secrets are not set on this repo yet."
+            echo "On the US server, create or rotate the plasma-ci Garage"
+            echo "key for bucket $S3_BUCKET, then add its access key and"
+            echo "secret key as repo secrets named S3_ACCESS_KEY_ID and"
+            echo "S3_SECRET_ACCESS_KEY."
             exit 1
           fi
           BASE="$(basename "$ISO" .iso)"
           DATED="${BASE}-$(date +%Y%m%d).iso"
           LATEST="AcreetionOS-${EDITION}-latest.iso"
-          export RCLONE_CONFIG_R2_TYPE=s3
-          export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
-          export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
-          export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
-          export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          rclone copyto "$ISO" "r2:${R2_BUCKET}/${DATED}" --progress --s3-chunk-size 64M
-          rclone copyto "r2:${R2_BUCKET}/${DATED}" "r2:${R2_BUCKET}/${LATEST}"
+          export RCLONE_CONFIG_S3_TYPE=s3
+          export RCLONE_CONFIG_S3_PROVIDER=Other
+          export RCLONE_CONFIG_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
+          export RCLONE_CONFIG_S3_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
+          export RCLONE_CONFIG_S3_ENDPOINT="$S3_ENDPOINT"
+          export RCLONE_CONFIG_S3_REGION=garage
+          export RCLONE_CONFIG_S3_FORCE_PATH_STYLE=true
+          rclone copyto "$ISO" "s3:${S3_BUCKET}/${DATED}" --progress --s3-chunk-size 64M
+          rclone copyto "s3:${S3_BUCKET}/${DATED}" "s3:${S3_BUCKET}/${LATEST}"
           ( cd ./ISO && sha256sum "$(basename "$ISO")" ) > SHA256SUMS.txt
-          rclone copyto SHA256SUMS.txt "r2:${R2_BUCKET}/SHA256SUMS.txt"
-          echo "Published ${DATED} (+ ${LATEST} alias) to R2 bucket ${R2_BUCKET}"
+          rclone copyto SHA256SUMS.txt "s3:${S3_BUCKET}/SHA256SUMS.txt"
+          echo "Published ${DATED} (+ ${LATEST} alias) to US-server S3 bucket ${S3_BUCKET}"
 
       - name: Publish Release
         if: github.event_name != 'pull_request'
